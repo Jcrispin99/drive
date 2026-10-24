@@ -10,6 +10,7 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 class UploadFileAction
 {
@@ -19,11 +20,17 @@ class UploadFileAction
             $disk = 'local';
             $storagePath = sprintf('drive/%d/%s', $user->id, Str::uuid()->toString());
 
-            Storage::disk($disk)->putFileAs(
+            $stored = Storage::disk($disk)->putFileAs(
                 dirname($storagePath),
                 $upload,
                 basename($storagePath)
             );
+
+            if ($stored === false) {
+                throw ValidationException::withMessages([
+                    'file' => 'No se pudo guardar el archivo. Comprueba el espacio disponible e inténtalo de nuevo.',
+                ]);
+            }
 
             $file = File::create([
                 'user_id' => $user->id,
@@ -57,11 +64,17 @@ class UploadFileAction
             $disk = $file->disk;
             $storagePath = sprintf('drive/%d/%s', $file->user_id, Str::uuid()->toString());
 
-            Storage::disk($disk)->putFileAs(
+            $stored = Storage::disk($disk)->putFileAs(
                 dirname($storagePath),
                 $upload,
                 basename($storagePath)
             );
+
+            if ($stored === false) {
+                throw ValidationException::withMessages([
+                    'file' => 'No se pudo guardar el archivo. Comprueba el espacio disponible e inténtalo de nuevo.',
+                ]);
+            }
 
             $nextVersion = ($file->versions()->max('version') ?? 0) + 1;
 

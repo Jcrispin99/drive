@@ -38,6 +38,9 @@ class HandleInertiaRequests extends Middleware
         return [
             ...parent::share($request),
             'name' => config('app.name'),
+            'driveUpload' => [
+                'maxSizeMb' => config('drive.max_upload_size_mb'),
+            ],
             'auth' => [
                 'user' => $request->user(),
             ],

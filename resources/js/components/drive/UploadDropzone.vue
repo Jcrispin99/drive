@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { router } from '@inertiajs/vue3';
+import { HttpResponseError } from '@inertiajs/core';
+import { router, useHttp, usePage } from '@inertiajs/vue3';
 import { CloudUpload, FolderUp } from 'lucide-vue-next';
-import { ref } from 'vue';
+import { computed, onBeforeUnmount, ref } from 'vue';
 import { toast } from 'vue-sonner';
 import { Button } from '@/components/ui/button';
-import drive from '@/routes/drive';
+import { store } from '@/routes/drive/upload';
 
 const props = defineProps<{
     folderId: number | null;
@@ -13,61 +14,155 @@ const props = defineProps<{
 const fileInput = ref<HTMLInputElement | null>(null);
 const folderInput = ref<HTMLInputElement | null>(null);
 const isDragging = ref(false);
-const inFlight = ref(0);
+const uploading = ref(false);
+const currentName = ref('');
+const currentIndex = ref(0);
+const totalFiles = ref(0);
+const page = usePage();
+const maxSizeMb = computed(() => page.props.driveUpload.maxSizeMb);
+const maxSizeLabel = computed(() =>
+    maxSizeMb.value >= 1024
+        ? `${maxSizeMb.value / 1024} GB`
+        : `${maxSizeMb.value} MB`,
+);
+const upload = useHttp<
+    {
+        file: File | null;
+        parent_id: number | null;
+        relative_path: string | null;
+    },
+    { file: { id: number } }
+>({ file: null, parent_id: null, relative_path: null });
+const percentage = computed(() => upload.progress?.percentage ?? 0);
+let disposed = false;
+
+onBeforeUnmount(() => {
+    disposed = true;
+    upload.cancel();
+});
 
 async function uploadOne(file: File, relativePath: string | null) {
-    const fd = new FormData();
-    fd.append('file', file);
-    if (props.folderId !== null) {
-        fd.append('parent_id', String(props.folderId));
-    }
-    if (relativePath) {
-        fd.append('relative_path', relativePath);
+    if (file.size > maxSizeMb.value * 1024 * 1024) {
+        toast.error(
+            `${file.name}: el máximo por archivo es ${maxSizeLabel.value}.`,
+        );
+
+        return false;
     }
 
-    inFlight.value += 1;
+    upload.file = file;
+    upload.parent_id = props.folderId;
+    upload.relative_path = relativePath;
+    upload.clearErrors();
+
     try {
-        const res = await fetch(drive.upload.store.url(), {
-            method: 'POST',
-            body: fd,
-            credentials: 'same-origin',
-            headers: {
-                Accept: 'application/json',
-                'X-Requested-With': 'XMLHttpRequest',
-                'X-XSRF-TOKEN': decodeURIComponent(getCookie('XSRF-TOKEN') ?? ''),
-            },
-        });
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
+        const response = await upload.post(store.url());
+
+        if (!response?.file?.id) {
+            toast.error(
+                `${file.name}: el servidor no confirmó la carga. Recarga la página e inténtalo de nuevo.`,
+            );
+
+            return false;
         }
-    } catch (e) {
-        toast.error(`Error al subir ${file.name}`);
+
+        return true;
+    } catch (error) {
+        if (disposed) {
+            return false;
+        }
+
+        let message =
+            'No se pudo completar la carga. Comprueba tu conexión e inténtalo de nuevo.';
+
+        if (error instanceof HttpResponseError) {
+            const status = error.response.status;
+
+            if (status === 413) {
+                message = 'El archivo supera el límite de carga del servidor.';
+            } else if (status === 401 || status === 419) {
+                message =
+                    'Tu sesión venció. Recarga la página e inicia sesión de nuevo.';
+            } else if (status === 403) {
+                message =
+                    'No tienes permiso para subir archivos en esta carpeta.';
+            } else if (status === 422) {
+                message =
+                    Object.values(upload.errors).flat().join(' ') ||
+                    'Revisa el archivo e inténtalo de nuevo.';
+            } else {
+                message =
+                    'El servidor no pudo guardar el archivo. Inténtalo de nuevo.';
+            }
+        }
+
+        toast.error(`${file.name}: ${message}`);
+
+        return false;
+    }
+}
+
+async function handleFiles(
+    filesList: FileList | null,
+    useRelativePath = false,
+) {
+    if (!filesList || filesList.length === 0) {
+        return;
+    }
+
+    if (uploading.value) {
+        toast.message(
+            'Espera a que termine la carga actual para añadir más archivos.',
+        );
+
+        return;
+    }
+
+    const files = Array.from(filesList);
+    totalFiles.value = files.length;
+    uploading.value = true;
+    let succeeded = 0;
+
+    try {
+        for (const [index, file] of files.entries()) {
+            if (disposed) {
+                break;
+            }
+
+            currentIndex.value = index + 1;
+            currentName.value = file.name;
+            const relativePath = useRelativePath
+                ? file.webkitRelativePath || null
+                : null;
+
+            if (await uploadOne(file, relativePath)) {
+                succeeded++;
+            }
+        }
+
+        if (disposed) {
+            return;
+        }
+
+        if (succeeded === files.length) {
+            toast.success(
+                `Se subieron ${succeeded} archivo${succeeded === 1 ? '' : 's'}.`,
+            );
+        } else if (succeeded > 0) {
+            toast.warning(
+                `Se subieron ${succeeded} de ${files.length} archivos. Reintenta los que fallaron.`,
+            );
+        }
+
+        if (succeeded > 0) {
+            router.reload({ only: ['folders', 'files'] });
+        }
     } finally {
-        inFlight.value -= 1;
+        uploading.value = false;
+        upload
+            .defaults({ file: null, parent_id: null, relative_path: null })
+            .reset();
     }
-}
-
-function getCookie(name: string): string | null {
-    const match = document.cookie.match(new RegExp('(^|; )' + name + '=([^;]*)'));
-    return match ? match[2] : null;
-}
-
-async function handleFiles(filesList: FileList | null, useRelativePath = false) {
-    if (!filesList || filesList.length === 0) return;
-    const total = filesList.length;
-    const tasks: Promise<void>[] = [];
-    for (let i = 0; i < total; i++) {
-        const f = filesList.item(i);
-        if (!f) continue;
-        const rel = useRelativePath
-            ? (f as File & { webkitRelativePath?: string }).webkitRelativePath ?? null
-            : null;
-        tasks.push(uploadOne(f, rel));
-    }
-    toast.message(`Subiendo ${total} archivo${total === 1 ? '' : 's'}…`);
-    await Promise.all(tasks);
-    toast.success('Subida completa');
-    router.reload({ only: ['folders', 'files'] });
 }
 
 function onDrop(e: DragEvent) {
@@ -102,18 +197,56 @@ function onFolderChange(e: Event) {
             <div>
                 <p class="font-medium">Arrastra y suelta archivos o carpetas</p>
                 <p class="text-sm text-muted-foreground">
-                    {{ inFlight > 0 ? `Subiendo ${inFlight} archivo(s)…` : 'O usa los botones de abajo' }}
+                    Todos los formatos, incluidos PowerPoint (.ppt y .pptx).
+                    Máximo {{ maxSizeLabel }} por archivo.
+                </p>
+            </div>
+            <div
+                v-if="uploading"
+                class="w-full max-w-md space-y-2"
+                role="status"
+                aria-live="polite"
+            >
+                <p class="truncate text-sm">
+                    {{ currentIndex }} de {{ totalFiles }}: {{ currentName }}
+                </p>
+                <progress
+                    class="h-2 w-full accent-primary"
+                    :value="percentage"
+                    max="100"
+                    :aria-label="`Progreso de ${currentName}`"
+                />
+                <p class="text-sm text-muted-foreground">
+                    {{
+                        percentage >= 100
+                            ? 'Guardando archivo…'
+                            : `Subiendo… ${percentage}%`
+                    }}
                 </p>
             </div>
             <div class="flex gap-2">
-                <Button variant="outline" @click="fileInput?.click()">
+                <Button
+                    variant="outline"
+                    :disabled="uploading"
+                    @click="fileInput?.click()"
+                >
                     <CloudUpload class="size-4" /> Subir archivos
                 </Button>
-                <Button variant="outline" @click="folderInput?.click()">
+                <Button
+                    variant="outline"
+                    :disabled="uploading"
+                    @click="folderInput?.click()"
+                >
                     <FolderUp class="size-4" /> Subir carpeta
                 </Button>
             </div>
-            <input ref="fileInput" type="file" multiple class="hidden" @change="onFileChange" />
+            <input
+                ref="fileInput"
+                type="file"
+                multiple
+                class="hidden"
+                @change="onFileChange"
+            />
             <input
                 ref="folderInput"
                 type="file"

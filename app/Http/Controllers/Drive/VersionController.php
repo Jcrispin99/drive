@@ -17,7 +17,10 @@ class VersionController extends Controller
         Gate::authorize('update', $file);
 
         $request->validate([
-            'file' => ['required', 'file', 'max:102400'],
+            'file' => ['required', 'file', 'max:'.(config('drive.max_upload_size_mb') * 1024)],
+        ], [
+            'file.max' => 'El archivo no debe superar '.config('drive.max_upload_size_mb').' MB.',
+            'file.uploaded' => 'No se pudo recibir el archivo. Comprueba el límite de carga del servidor e inténtalo de nuevo.',
         ]);
 
         $upload->addVersion($request->user(), $file, $request->file('file'));

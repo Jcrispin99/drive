@@ -11,7 +11,7 @@ const props = defineProps<{
     files?: Array<{ id: number; name: string; mime_type: string; size: number }>;
 }>();
 
-defineOptions({ layout: null });
+defineOptions({ layout: [] });
 
 const downloadUrl = `/s/${props.token}/download`;
 </script>
